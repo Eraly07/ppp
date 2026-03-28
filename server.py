@@ -30,18 +30,14 @@ def _load_dotenv(path: str) -> None:
     except FileNotFoundError:
         return
     except Exception:
-        # Ignore .env parsing errors; hosting env vars should still work.
         return
-
 
 def _now() -> float:
     return time.time()
 
-
 def _prune(ts: list[float]) -> list[float]:
     cutoff = _now() - RATE_WINDOW_SEC
     return [t for t in ts if t >= cutoff]
-
 
 def _allow_request(ip: str) -> bool:
     ts = _rate.get(ip, [])
@@ -53,14 +49,11 @@ def _allow_request(ip: str) -> bool:
     _rate[ip] = ts
     return True
 
-
 def _get_openrouter_key() -> str:
     return (os.getenv("OPENROUTER_API_KEY") or "").strip()
 
-
 def _get_model() -> str:
     return (os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
-
 
 def _system_prompt(mode: str) -> str:
     if mode == "sim":
@@ -76,7 +69,6 @@ def _system_prompt(mode: str) -> str:
         "Output ONLY valid JSON, no markdown, no code fences. "
         'Schema: {"risk":"HIGH|MEDIUM|LOW","risk_label":"local risk name","what":"2-3 sentences","steps":["s1","s2","s3"],"prevention":"tip"}'
     )
-
 
 class Handler(SimpleHTTPRequestHandler):
     def _client_ip(self) -> str:
@@ -144,33 +136,47 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON body."})
             return
 
+        # Получаем параметры
         text = (payload.get("text") or "").strip()
         mode = (payload.get("mode") or "adv").strip()
         system = (payload.get("system") or "").strip()
+        messages = payload.get("messages")  # новый формат
 
-        if not text:
-            self._send_json(400, {"error": "Missing 'text'."})
-            return
-        if len(text) > MAX_INPUT_CHARS:
-            self._send_json(413, {"error": "Input too long."})
-            return
-        if mode not in ("adv", "sim"):
-            self._send_json(400, {"error": "Invalid 'mode'."})
+        # Проверка
+        if not messages and not text:
+            self._send_json(400, {"error": "Missing 'text' or 'messages'."})
             return
 
-        sys_prompt = system or _system_prompt(mode)
+        # Формируем запрос к OpenRouter
         req_body = {
             "model": _get_model(),
             "max_tokens": 900,
             "temperature": 0.6 if mode == "sim" else 0.2,
-            "messages": [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": text},
-            ],
         }
 
-        referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
+        if messages and isinstance(messages, list):
+            # Если передан массив сообщений, подставляем system первым, если он есть
+            final_messages = messages.copy()
+            if system:
+                # Удаляем предыдущий system, если есть
+                final_messages = [m for m in final_messages if m.get("role") != "system"]
+                final_messages.insert(0, {"role": "system", "content": system})
+            req_body["messages"] = final_messages
+        else:
+            # Старый режим: один user message
+            if len(text) > MAX_INPUT_CHARS:
+                self._send_json(413, {"error": "Input too long."})
+                return
+            if mode not in ("adv", "sim"):
+                self._send_json(400, {"error": "Invalid 'mode'."})
+                return
+            sys_prompt = system or _system_prompt(mode)
+            req_body["messages"] = [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": text},
+            ]
 
+        referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
         req = Request(
             OPENROUTER_ENDPOINT,
             data=json.dumps(req_body).encode("utf-8"),
