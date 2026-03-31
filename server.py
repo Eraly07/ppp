@@ -149,8 +149,8 @@ class Handler(SimpleHTTPRequestHandler):
         req_body = {
             "model": _get_model(),
             "max_tokens": 150,
-            "temperature": 0.6 if mode == "sim" else 0.3,
-            "reasoning": False,
+            "temperature": 0.7 if mode == "sim" else 0.3,
+
         }
 
         # КРИТИЧНО: final_messages айнымалысын дұрыс анықтау
@@ -164,7 +164,7 @@ class Handler(SimpleHTTPRequestHandler):
             if len(text) > MAX_INPUT_CHARS:
                 self._send_json(413, {"error": "Input too long."})
                 return
-            if mode not in ("adv", "sim"):
+            if mode not in ("adv", "sim", "analyse"):
                 self._send_json(400, {"error": "Invalid 'mode'."})
                 return
             sys_prompt = system or _system_prompt(mode)
