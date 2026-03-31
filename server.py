@@ -6,7 +6,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen-2.5-7b-instruct:free"  # Жұмыс істейтін нұсқа
+DEFAULT_MODEL = "qwen/qwen-2.5-7b-instruct:free"
 
 RATE_WINDOW_SEC = int(os.getenv("RATE_WINDOW_SEC", "60"))
 RATE_MAX = int(os.getenv("RATE_MAX", "20"))
@@ -145,21 +145,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Missing 'text' or 'messages'."})
             return
 
-        # Формируем запрос к OpenRouter
-        req_body = {
-            "model": _get_model(),
-            "max_tokens": 150,
-            "temperature": 0.7 if mode == "sim" else 0.3,
-
-        }
-
-        # КРИТИЧНО: final_messages айнымалысын дұрыс анықтау
+        # Build final_messages — always defined before req_body
         if messages and isinstance(messages, list):
             final_messages = messages.copy()
             if system:
                 final_messages = [m for m in final_messages if m.get("role") != "system"]
                 final_messages.insert(0, {"role": "system", "content": system})
-            req_body["messages"] = final_messages
         else:
             if len(text) > MAX_INPUT_CHARS:
                 self._send_json(413, {"error": "Input too long."})
@@ -168,10 +159,18 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(400, {"error": "Invalid 'mode'."})
                 return
             sys_prompt = system or _system_prompt(mode)
-            req_body["messages"] = [
+            final_messages = [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": text},
             ]
+
+        # "reasoning" param REMOVED — causes 502 on Qwen and most free models
+        req_body = {
+            "model": _get_model(),
+            "max_tokens": 300,
+            "temperature": 0.7 if mode == "sim" else 0.3,
+            "messages": final_messages,
+        }
 
         referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
         req = Request(
