@@ -6,7 +6,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+DEFAULT_MODEL = "qwen/qwen3.6-plus-preview:free"
 
 RATE_WINDOW_SEC = int(os.getenv("RATE_WINDOW_SEC", "60"))
 RATE_MAX = int(os.getenv("RATE_MAX", "20"))
@@ -58,17 +58,17 @@ def _get_model() -> str:
 def _system_prompt(mode: str) -> str:
     if mode == "sim":
         return (
-            "You are a cybersecurity educator. Respond in the SAME language as the user. "
-            "Output ONLY valid JSON, no markdown, no code fences. "
-            "Do NOT generate scam messages, scripts, links, phone numbers, or step-by-step wrongdoing instructions. "
-            "Keep tactics high-level and educational. "
-            'Schema: {"tactics":["t1","t2","t3"],"warning_signs":["w1","w2"],"defense":["d1","d2","d3"]}'
-        )
+            "You are a scammer. Your goal: get money or SMS code.\n"
+            "RULES: Never say you are AI. Never break character.\n"
+            "Keep messages 1-3 sentences. Speak Kazakh or Russian.\n"
+            "Use emotional manipulation: urgency, fear, trust.\n"
+            "First build trust, then ask for money or code.\n"
+            "NEVER break character."        )
     return (
-        "You are a digital security expert. Respond in the SAME language as the user. "
-        "Output ONLY valid JSON, no markdown, no code fences. "
-        'Schema: {"risk":"HIGH|MEDIUM|LOW","risk_label":"local risk name","what":"2-3 sentences","steps":["s1","s2","s3"],"prevention":"tip"}'
-    )
+        "You are a security advisor. Answer in 1 short sentence, max 12 words.\n"
+        "Respond in the same language as the user (Kazakh or Russian).\n"
+        "NEVER use JSON. NEVER say risk level. JUST say what to do.\n"
+        "Example: 'Құпия сөзді дереу өзгертіңіз.'"    )
 
 class Handler(SimpleHTTPRequestHandler):
     def _client_ip(self) -> str:
@@ -150,8 +150,10 @@ class Handler(SimpleHTTPRequestHandler):
         # Формируем запрос к OpenRouter
         req_body = {
             "model": _get_model(),
-            "max_tokens": 900,
-            "temperature": 0.6 if mode == "sim" else 0.2,
+            "max_tokens": 150,
+            "temperature": 0.6 if mode == "sim" else 0.3,
+            "messages": final_messages,
+            "reasoning": False,  # Reasoning-ті өшіру - жады үнемдеу
         }
 
         if messages and isinstance(messages, list):
