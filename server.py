@@ -6,14 +6,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen3.6-plus-preview:free"
+DEFAULT_MODEL = "qwen/qwen-2.5-7b-instruct:free"  # Жұмыс істейтін нұсқа
 
 RATE_WINDOW_SEC = int(os.getenv("RATE_WINDOW_SEC", "60"))
 RATE_MAX = int(os.getenv("RATE_MAX", "20"))
 MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "8000"))
 OPENROUTER_TIMEOUT_SEC = float(os.getenv("OPENROUTER_TIMEOUT_SEC", "35"))
 
-_rate = {}  # ip -> list[timestamps]
+_rate = {}
 
 def _load_dotenv(path: str) -> None:
     try:
@@ -63,12 +63,14 @@ def _system_prompt(mode: str) -> str:
             "Keep messages 1-3 sentences. Speak Kazakh or Russian.\n"
             "Use emotional manipulation: urgency, fear, trust.\n"
             "First build trust, then ask for money or code.\n"
-            "NEVER break character."        )
+            "NEVER break character."
+        )
     return (
         "You are a security advisor. Answer in 1 short sentence, max 12 words.\n"
         "Respond in the same language as the user (Kazakh or Russian).\n"
         "NEVER use JSON. NEVER say risk level. JUST say what to do.\n"
-        "Example: 'Құпия сөзді дереу өзгертіңіз.'"    )
+        "Example: 'Құпия сөзді дереу өзгертіңіз.'"
+    )
 
 class Handler(SimpleHTTPRequestHandler):
     def _client_ip(self) -> str:
@@ -82,8 +84,11 @@ class Handler(SimpleHTTPRequestHandler):
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
 
     def _send_json(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -115,12 +120,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         key = _get_openrouter_key()
         if not key:
-            self._send_json(
-                500,
-                {
-                    "error": "Server is missing OPENROUTER_API_KEY env var.",
-                },
-            )
+            self._send_json(500, {"error": "Server is missing OPENROUTER_API_KEY env var."})
             return
 
         try:
@@ -136,13 +136,11 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON body."})
             return
 
-        # Получаем параметры
         text = (payload.get("text") or "").strip()
         mode = (payload.get("mode") or "adv").strip()
         system = (payload.get("system") or "").strip()
-        messages = payload.get("messages")  # новый формат
+        messages = payload.get("messages")
 
-        # Проверка
         if not messages and not text:
             self._send_json(400, {"error": "Missing 'text' or 'messages'."})
             return
@@ -152,20 +150,17 @@ class Handler(SimpleHTTPRequestHandler):
             "model": _get_model(),
             "max_tokens": 150,
             "temperature": 0.6 if mode == "sim" else 0.3,
-            "messages": final_messages,
-            "reasoning": False,  # Reasoning-ті өшіру - жады үнемдеу
+            "reasoning": False,
         }
 
+        # КРИТИЧНО: final_messages айнымалысын дұрыс анықтау
         if messages and isinstance(messages, list):
-            # Если передан массив сообщений, подставляем system первым, если он есть
             final_messages = messages.copy()
             if system:
-                # Удаляем предыдущий system, если есть
                 final_messages = [m for m in final_messages if m.get("role") != "system"]
                 final_messages.insert(0, {"role": "system", "content": system})
             req_body["messages"] = final_messages
         else:
-            # Старый режим: один user message
             if len(text) > MAX_INPUT_CHARS:
                 self._send_json(413, {"error": "Input too long."})
                 return
@@ -201,13 +196,7 @@ class Handler(SimpleHTTPRequestHandler):
                 detail = e.read().decode("utf-8")[:2000]
             except Exception:
                 detail = ""
-            self._send_json(
-                502,
-                {
-                    "error": f"Upstream error (HTTP {e.code}).",
-                    "detail": detail,
-                },
-            )
+            self._send_json(502, {"error": f"Upstream error (HTTP {e.code}).", "detail": detail})
             return
         except URLError:
             self._send_json(502, {"error": "Upstream connection failed."})
