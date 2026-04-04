@@ -17,7 +17,7 @@ OPENROUTER_TIMEOUT_SEC = float(os.getenv("OPENROUTER_TIMEOUT_SEC", "35"))
 OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "300"))
 OPENROUTER_ANALYZE_MAX_TOKENS = int(os.getenv("OPENROUTER_ANALYZE_MAX_TOKENS", "220"))
 
-_rate = {}  # ip -> list[timestamps]
+_rate = {}
 
 def _load_dotenv(path: str) -> None:
     try:
@@ -34,18 +34,14 @@ def _load_dotenv(path: str) -> None:
     except FileNotFoundError:
         return
     except Exception:
-        # Ignore .env parsing errors; hosting env vars should still work.
         return
-
 
 def _now() -> float:
     return time.time()
 
-
 def _prune(ts: list[float]) -> list[float]:
     cutoff = _now() - RATE_WINDOW_SEC
     return [t for t in ts if t >= cutoff]
-
 
 def _allow_request(ip: str) -> bool:
     ts = _rate.get(ip, [])
@@ -57,47 +53,76 @@ def _allow_request(ip: str) -> bool:
     _rate[ip] = ts
     return True
 
-
 def _get_openrouter_key() -> str:
     return (os.getenv("OPENROUTER_API_KEY") or "").strip()
-
 
 def _get_model() -> str:
     return (os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
 
-
-def _system_prompt(mode: str) -> str:
-    if mode == "sim":
-        return (
-            "You are a scammer. Stay in character. Short messages 1-2 sentences. No explanations. "
-            "Speak Kazakh or Russian. Use urgency and fear. Never say you are AI. "
-            "Goal: get SMS code, card details or money."
-        )
+def _system_prompt_adv() -> str:
     return (
         "You are a digital security expert. Respond in the SAME language as the user. "
         "Output ONLY valid JSON, no markdown, no code fences. "
-        'Schema: {"risk":"HIGH|MEDIUM|LOW","risk_label":"local risk name","what":"2-3 sentences","steps":["s1","s2","s3"],"prevention":"tip"}'
+        "Schema: {\"risk\":\"HIGH|MEDIUM|LOW\",\"risk_label\":\"short label\","
+        "\"what\":\"2-3 sentences\",\"steps\":[\"s1\",\"s2\",\"s3\"],\"prevention\":\"tip\"}"
     )
 
+def _system_prompt_sim(scenario: str) -> str:
+    scenarios = {
+        "bank": (
+            "You are a scammer pretending to be a bank security officer. "
+            "Tell the victim about suspicious activity on their account and ask for SMS code or card details. "
+            "Use urgency and authority. Write in Kazakh or Russian (simple, casual). "
+            "Keep messages 1-3 sentences. Never say you are AI."
+        ),
+        "delivery": (
+            "You are a scammer pretending to be a delivery service operator. "
+            "Tell the victim their package is stuck and ask for payment or personal data. "
+            "Use urgency and fear. Write in Kazakh or Russian. 1-3 sentences. Never say you are AI."
+        ),
+        "prize": (
+            "You are a scammer pretending to be a contest organizer. "
+            "Tell the victim they won a prize but need to pay a commission or provide data. "
+            "Use excitement and urgency. Write in Kazakh or Russian. 1-3 sentences. Never say you are AI."
+        ),
+        "friend": (
+            "You are a scammer pretending to be a friend of the victim. "
+            "First greet friendly, then suddenly ask for money (e.g., 'Help, I need money urgently', 'Can you transfer 5000 tenge?'). "
+            "Use trust and urgency. Write in Kazakh or Russian. 1-3 sentences. Never say you are AI."
+        ),
+    }
+    base = (
+        "You are a scammer. Stay in character. Short messages 1-3 sentences. "
+        "Never say you are AI. Use emotional manipulation (urgency, fear, trust, authority). "
+        "First build trust, then ask for sensitive info (SMS code, card details, money).\n"
+    )
+    return base + scenarios.get(scenario, scenarios["bank"])
 
 def _analysis_prompt(event: str) -> str:
-    if event == "end":
+    if event == "stop":
         return (
             "You are a cybersecurity training coach. Respond in the SAME language as the user. "
-            "Output ONLY valid JSON, no markdown, no code fences. "
-            "Summarize the user's behavior in a scam-awareness simulation. "
-            "Do NOT include any scammer messages or sensitive data. "
-            'Schema: {"summary":"2-4 sentences","good_moves":["g1","g2"],"mistakes":["m1","m2"],"advice":["a1","a2","a3"],"score":0}'
+            "Write a short training message that explains why the user got manipulated and what to do next. "
+            "Do NOT impersonate a scammer. Do NOT include any scam messages. "
+            "Do NOT repeat sensitive data; use [REDACTED]. "
+            "Output PLAIN TEXT only. Format:\n"
+            "TITLE: ...\n"
+            "WHY:\n- ...\n- ...\n"
+            "WHAT TO DO NOW:\n- ...\n- ...\n"
+            "NEXT TIME:\n- ...\n- ...\n"
         )
     return (
         "You are a cybersecurity training coach. Respond in the SAME language as the user. "
-        "Check if the user made a critical mistake (sharing OTP/SMS code, passwords, card details, sending money, "
-        "installing remote access, or trusting unverified requests). "
-        "Do NOT include any scammer messages. Do NOT repeat sensitive data; use [REDACTED]. "
-        "Output ONLY valid JSON, no markdown, no code fences. "
-        'Schema: {"stop":true|false,"title":"short","why":["w1","w2"],"advice":["a1","a2"],"tip":"optional"}'
+        "Analyze the conversation for manipulation tactics (authority, urgency, guilt, scarcity, social proof, pressure). "
+        "Do NOT impersonate a scammer. Do NOT include any scam messages. "
+        "Do NOT repeat sensitive data; use [REDACTED]. "
+        "Output PLAIN TEXT only. Format:\n"
+        "SUMMARY: 2-4 sentences.\n"
+        "TACTICS USED:\n- ...\n"
+        "USER RESPONSES:\n- good: ...\n- risky: ...\n"
+        "ADVICE:\n- ...\n- ...\n"
+        "SCORE: 0-100\n"
     )
-
 
 def _sanitize_text(text: str) -> str:
     t = (text or "").strip()
@@ -112,7 +137,6 @@ def _sanitize_text(text: str) -> str:
     )
     return t
 
-
 def _format_history(history: list[dict]) -> str:
     lines = []
     for item in history[-12:]:
@@ -126,7 +150,6 @@ def _format_history(history: list[dict]) -> str:
         lines.append(f"{tag}: {content}")
     return "\n".join(lines)
 
-
 class Handler(SimpleHTTPRequestHandler):
     def _req_path(self) -> str:
         try:
@@ -135,12 +158,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.path
 
     def _is_ai_path(self) -> bool:
-        # Allow "/api/ai", "/api/ai/" and "/api/ai?x=1"
         p = (self._req_path() or "").rstrip("/")
         return p == "/api/ai"
 
     def _is_analyze_path(self) -> bool:
-        # Allow "/api/analyze", "/api/analyze/" and "/api/analyze?x=1"
         p = (self._req_path() or "").rstrip("/")
         return p == "/api/analyze"
 
@@ -155,9 +176,10 @@ class Handler(SimpleHTTPRequestHandler):
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        # `ngrok-skip-browser-warning` helps bypass ngrok's interstitial on free tunnels.
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, ngrok-skip-browser-warning")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _send_json(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -178,18 +200,13 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        # Health check for deploy debugging.
         if self._is_ai_path() or self._is_analyze_path():
-            self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "service": "ai-proxy",
-                    "path": self._req_path(),
-                    "model": _get_model(),
-                    "has_key": bool(_get_openrouter_key()),
-                },
-            )
+            self._send_json(200, {
+                "ok": True,
+                "service": "ai-proxy",
+                "model": _get_model(),
+                "has_key": bool(_get_openrouter_key()),
+            })
             return
         return super().do_GET()
 
@@ -198,44 +215,38 @@ class Handler(SimpleHTTPRequestHandler):
         if not _allow_request(ip):
             self._send_json(429, {"error": "Rate limit. Try again later."})
             return
-
         key = _get_openrouter_key()
         if not key:
-            self._send_json(
-                500,
-                {
-                    "error": "Server is missing OPENROUTER_API_KEY env var.",
-                },
-            )
+            self._send_json(500, {"error": "OPENROUTER_API_KEY missing"})
             return
-
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
-            self._send_json(400, {"error": "Invalid Content-Length."})
+            self._send_json(400, {"error": "Invalid Content-Length"})
             return
-
         body = self.rfile.read(length) if length > 0 else b"{}"
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
-            self._send_json(400, {"error": "Invalid JSON body."})
+            self._send_json(400, {"error": "Invalid JSON"})
             return
 
-        event = (payload.get("event") or "check").strip().lower()
+        event = (payload.get("event") or "end").strip().lower()
         history = payload.get("history")
         last_user = (payload.get("last_user") or "").strip()
-
-        if event not in ("check", "end"):
-            self._send_json(400, {"error": "Invalid 'event'."})
+        scenario = (payload.get("scenario") or "").strip()
+        if event not in ("stop", "end"):
+            self._send_json(400, {"error": "Invalid event"})
             return
         if not isinstance(history, list) or not history:
-            self._send_json(400, {"error": "Missing 'history'."})
+            self._send_json(400, {"error": "Missing history"})
             return
 
         convo = _format_history(history)
         if last_user:
             convo = (convo + "\nLAST_USER: " + _sanitize_text(last_user)).strip()
+        if scenario:
+            convo = ("SCENARIO: " + scenario + "\n" + convo).strip()
 
         req_body = {
             "model": _get_model(),
@@ -246,7 +257,6 @@ class Handler(SimpleHTTPRequestHandler):
                 {"role": "user", "content": convo},
             ],
         }
-
         referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
         req = Request(
             OPENROUTER_ENDPOINT,
@@ -259,8 +269,6 @@ class Handler(SimpleHTTPRequestHandler):
                 **({"HTTP-Referer": referer} if referer else {}),
             },
         )
-
-        # Retry: 3 рет қайталау (502/URLError болғанда)
         data = None
         last_error = None
         for attempt in range(3):
@@ -276,27 +284,20 @@ class Handler(SimpleHTTPRequestHandler):
                     detail = e.read().decode("utf-8")[:2000]
                 except Exception:
                     detail = ""
-                last_error = {"error": f"Upstream error (HTTP {e.code}).", "detail": detail}
+                last_error = {"error": f"Upstream error (HTTP {e.code})", "detail": detail}
                 if e.code not in (502, 503, 429):
                     break
                 time.sleep(1.5)
             except URLError:
-                last_error = {"error": "Upstream connection failed."}
+                last_error = {"error": "Upstream connection failed"}
                 time.sleep(1.5)
             except Exception:
-                last_error = {"error": "Unexpected server error."}
+                last_error = {"error": "Unexpected server error"}
                 break
-
         if last_error or data is None:
-            self._send_json(502, last_error or {"error": "No response after retries."})
+            self._send_json(502, last_error or {"error": "No response"})
             return
-
-        content = ""
-        try:
-            content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-        except Exception:
-            content = ""
-
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
         usage = data.get("usage") if isinstance(data, dict) else None
         self._send_json(200, {"content": content, "usage": usage, "model": _get_model()})
 
@@ -310,72 +311,71 @@ class Handler(SimpleHTTPRequestHandler):
 
         ip = self._client_ip()
         if not _allow_request(ip):
-            self._send_json(429, {"error": "Rate limit. Try again later."})
+            self._send_json(429, {"error": "Rate limit"})
             return
-
         key = _get_openrouter_key()
         if not key:
-            self._send_json(
-                500,
-                {
-                    "error": "Server is missing OPENROUTER_API_KEY env var.",
-                },
-            )
+            self._send_json(500, {"error": "OPENROUTER_API_KEY missing"})
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
-            self._send_json(400, {"error": "Invalid Content-Length."})
+            self._send_json(400, {"error": "Invalid Content-Length"})
             return
-
         body = self.rfile.read(length) if length > 0 else b"{}"
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
-            self._send_json(400, {"error": "Invalid JSON body."})
+            self._send_json(400, {"error": "Invalid JSON"})
             return
 
-        text = (payload.get("text") or "").strip()
         mode = (payload.get("mode") or "adv").strip()
-        system = (payload.get("system") or "").strip()
-        messages = payload.get("messages")  # чат тарихы бар болса
-
-        if mode not in ("adv", "sim"):
-            self._send_json(400, {"error": "Invalid 'mode'."})
-            return
-
-        # messages тізімі берілсе — оны тікелей жіберемін
-        if messages and isinstance(messages, list):
-            final_messages = []
-            for m in messages:
-                if not isinstance(m, dict): continue
-                role = (m.get("role") or "").strip()
-                cont = (m.get("content") or "").strip()
-                if role in ("system","user","assistant") and cont:
-                    final_messages.append({"role": role, "content": cont[:3000]})
-        else:
-            if not text:
-                self._send_json(400, {"error": "Missing 'text'."})
-                return
-            if len(text) > MAX_INPUT_CHARS:
-                self._send_json(413, {"error": "Input too long."})
-                return
-            sys_prompt = system or _system_prompt(mode)
-            final_messages = [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": text},
-            ]
+        text = (payload.get("text") or "").strip()
+        messages = payload.get("messages")
+        scenario = (payload.get("scenario") or "bank").strip()
 
         req_body = {
             "model": _get_model(),
             "max_tokens": OPENROUTER_MAX_TOKENS,
             "temperature": 0.7 if mode == "sim" else 0.2,
-            "messages": final_messages,
         }
 
-        referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
+        if messages and isinstance(messages, list):
+            final_messages = []
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                role = (m.get("role") or "").strip()
+                cont = (m.get("content") or "").strip()
+                if role in ("system", "user", "assistant") and cont:
+                    final_messages.append({"role": role, "content": cont[:3000]})
+            if mode == "sim":
+                sys_prompt = _system_prompt_sim(scenario)
+                final_messages = [m for m in final_messages if m.get("role") != "system"]
+                final_messages.insert(0, {"role": "system", "content": sys_prompt})
+            else:
+                sys_prompt = _system_prompt_adv()
+                final_messages = [m for m in final_messages if m.get("role") != "system"]
+                final_messages.insert(0, {"role": "system", "content": sys_prompt})
+            req_body["messages"] = final_messages
+        else:
+            if not text:
+                self._send_json(400, {"error": "Missing 'text'"})
+                return
+            if len(text) > MAX_INPUT_CHARS:
+                self._send_json(413, {"error": "Input too long"})
+                return
+            if mode == "sim":
+                sys_prompt = _system_prompt_sim(scenario)
+            else:
+                sys_prompt = _system_prompt_adv()
+            req_body["messages"] = [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": text},
+            ]
 
+        referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
         req = Request(
             OPENROUTER_ENDPOINT,
             data=json.dumps(req_body).encode("utf-8"),
@@ -387,8 +387,6 @@ class Handler(SimpleHTTPRequestHandler):
                 **({"HTTP-Referer": referer} if referer else {}),
             },
         )
-
-        # Retry: 3 рет қайталау
         data = None
         last_error = None
         for attempt in range(3):
@@ -404,41 +402,31 @@ class Handler(SimpleHTTPRequestHandler):
                     detail = e.read().decode("utf-8")[:2000]
                 except Exception:
                     detail = ""
-                last_error = {"error": f"Upstream error (HTTP {e.code}).", "detail": detail}
+                last_error = {"error": f"Upstream error (HTTP {e.code})", "detail": detail}
                 if e.code not in (502, 503, 429):
                     break
                 time.sleep(1.5)
             except URLError:
-                last_error = {"error": "Upstream connection failed."}
+                last_error = {"error": "Upstream connection failed"}
                 time.sleep(1.5)
             except Exception:
-                last_error = {"error": "Unexpected server error."}
+                last_error = {"error": "Unexpected server error"}
                 break
-
         if last_error or data is None:
-            self._send_json(502, last_error or {"error": "No response after retries."})
+            self._send_json(502, last_error or {"error": "No response"})
             return
-
-        content = ""
-        try:
-            content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-        except Exception:
-            content = ""
-
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
         usage = data.get("usage") if isinstance(data, dict) else None
         self._send_json(200, {"content": content, "usage": usage, "model": _get_model()})
-
 
 def main() -> None:
     root_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(root_dir)
     _load_dotenv(os.path.join(root_dir, ".env"))
     _load_dotenv(os.path.join(root_dir, "api.env"))
-
     port = int(os.getenv("PORT", "8787"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
-
 
 if __name__ == "__main__":
     main()
