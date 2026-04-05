@@ -106,22 +106,21 @@ def _system_prompt_sim(scenario: str) -> str:
 def _analysis_prompt(event: str) -> str:
     if event == "stop":
         return (
-            "You are a cybersecurity training coach. Respond in the SAME language as the user. "
-            "Write a short training message explaining why the user got manipulated and what to do next. "
-            "Do NOT impersonate a scammer. Do NOT include any scam messages. "
-            "Do NOT repeat sensitive data; use [REDACTED]. "
-            "Output PLAIN TEXT only. Format:\n"
-            "TITLE: ...\nWHY:\n- ...\n- ...\nWHAT TO DO NOW:\n- ...\n- ...\nNEXT TIME:\n- ...\n- ...\n"
+            "You are a cybersecurity coach. Respond in the SAME language as the user (Kazakh or Russian). "
+            "Write a VERY SHORT message (max 4 sentences). Plain text only, no JSON, no markdown. "
+            "Format: what mistake (1 sentence), why it's dangerous (1 sentence), advice (2 sentences). "
+            "Example (Kazakh): 'Сіз кодты жібердіңіз. Бұл қауіпті, себебі алаяқ шотыңызға кіреді. Ешқашан кодты бөгдеге айтпаңыз. Банкке өзіңіз қоңырау шалыңыз.' "
+            "Example (Russian): 'Вы отправили код. Это опасно, мошенник получит доступ к счету. Никогда не сообщайте код. Позвоните в банк сами.'"
         )
+    # event == "end"
     return (
-        "You are a cybersecurity training coach. Respond in the SAME language as the user. "
-        "Analyze the conversation for manipulation tactics (authority, urgency, guilt, scarcity, social proof, pressure). "
-        "Do NOT impersonate a scammer. Do NOT include any scam messages. "
-        "Do NOT repeat sensitive data; use [REDACTED]. "
-        "Output PLAIN TEXT only. Format:\n"
-        "SUMMARY: 2-4 sentences.\nTACTICS USED:\n- ...\nUSER RESPONSES:\n- good: ...\n- risky: ...\nADVICE:\n- ...\n- ...\nSCORE: 0-100\n"
+        "You are a cybersecurity coach. Respond in the SAME language as the user (Kazakh or Russian). "
+        "Write a VERY SHORT analysis (max 5 sentences). Plain text only, no JSON, no markdown. "
+        "Format: summary (1 sentence), mistakes (1-2 sentences), advice (2 sentences). "
+        "Example (Kazakh): 'Сіз манипуляцияға түстіңіз. Алаяқтың асығыстығына сендіңіз. Құпия деректерді бермеңіз. Банкке өзіңіз хабарласыңыз.' "
+        "Example (Russian): 'Вы поддались манипуляции. Поверили в срочность. Не передавайте личные данные. Свяжитесь с банком сами.'"
     )
-
+    
 def _sanitize_text(text: str) -> str:
     t = (text or "").strip()
     if not t:
