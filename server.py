@@ -157,6 +157,10 @@ class Handler(SimpleHTTPRequestHandler):
         p = (self._req_path() or "").rstrip("/")
         return p == "/api/analyze"
 
+    def _is_scores_path(self) -> bool:
+        p = (self._req_path() or "").rstrip("/")
+        return p == "/api/scores"
+
     def _client_ip(self) -> str:
         xff = self.headers.get("X-Forwarded-For")
         if xff:
@@ -184,7 +188,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_OPTIONS(self) -> None:
-        if not (self._is_ai_path() or self._is_analyze_path()):
+        if not (self._is_ai_path() or self._is_analyze_path() or self._is_scores_path()):
             self.send_error(404)
             return
         self.send_response(204)
@@ -192,10 +196,75 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        if self._is_scores_path():
+            self._handle_scores_get()
+            return
         if self._is_ai_path() or self._is_analyze_path():
             self._send_json(200, {"ok": True, "service": "ai-proxy", "model": _get_model(), "has_key": bool(_get_openrouter_key())})
             return
         return super().do_GET()
+
+
+    # ─── SCORES ────────────────────────────────────────────────────
+    def _scores_file(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "scores.json")
+
+    def _load_scores(self) -> list:
+        try:
+            with open(self._scores_file(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _save_scores(self, scores: list) -> None:
+        with open(self._scores_file(), "w", encoding="utf-8") as f:
+            json.dump(scores, f, ensure_ascii=False)
+
+    def _handle_scores_get(self) -> None:
+        scores = self._load_scores()
+        # Сорттап топ-20 қайтарамыз
+        scores.sort(key=lambda x: x.get("s", 0), reverse=True)
+        self._send_json(200, {"scores": scores[:20]})
+
+    def _handle_scores_post(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self._send_json(400, {"error": "Invalid Content-Length."})
+            return
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"error": "Invalid JSON."})
+            return
+
+        name = (payload.get("name") or "").strip()[:24]
+        score = payload.get("score")
+        quiz_type = (payload.get("type") or "quiz").strip()  # quiz | weekly
+
+        if not name:
+            self._send_json(400, {"error": "Missing name."})
+            return
+        if not isinstance(score, (int, float)) or score < 0:
+            self._send_json(400, {"error": "Invalid score."})
+            return
+
+        scores = self._load_scores()
+        from datetime import date
+        today = date.today().strftime("%d.%m")
+
+        # Бір күнде бір атпен бір рет
+        scores = [r for r in scores if not (r.get("name") == name and r.get("type") == quiz_type)]
+        scores.append({"name": name, "s": int(score), "d": today, "type": quiz_type})
+
+        # Максимум 200 жазба сақтаймыз
+        scores.sort(key=lambda x: x.get("s", 0), reverse=True)
+        scores = scores[:200]
+        self._save_scores(scores)
+        self._send_json(200, {"ok": True})
+    # ───────────────────────────────────────────────────────────────
 
     def _handle_analyze(self) -> None:
         ip = self._client_ip()
@@ -289,6 +358,9 @@ class Handler(SimpleHTTPRequestHandler):
         self._send_json(200, {"content": content, "usage": usage, "model": _get_model()})
 
     def do_POST(self) -> None:
+        if self._is_scores_path():
+            self._handle_scores_post()
+            return
         if self._is_analyze_path():
             self._handle_analyze()
             return
