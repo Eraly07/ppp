@@ -242,7 +242,8 @@ class Handler(SimpleHTTPRequestHandler):
 
         name = (payload.get("name") or "").strip()[:24]
         score = payload.get("score")
-        quiz_type = (payload.get("type") or "quiz").strip()  # quiz | weekly
+        course_id = (payload.get("course_id") or payload.get("type") or "course").strip()
+        course = (payload.get("course") or "").strip()[:80]
 
         if not name:
             self._send_json(400, {"error": "Missing name."})
@@ -256,8 +257,8 @@ class Handler(SimpleHTTPRequestHandler):
         today = date.today().strftime("%d.%m")
 
         # Бір күнде бір атпен бір рет
-        scores = [r for r in scores if not (r.get("name") == name and r.get("type") == quiz_type)]
-        scores.append({"name": name, "s": int(score), "d": today, "type": quiz_type})
+        scores = [r for r in scores if not (r.get("name") == name and r.get("course_id") == course_id)]
+        scores.append({"name": name, "s": int(score), "d": today, "type": course_id, "course_id": course_id, "course": course})
 
         # Максимум 200 жазба сақтаймыз
         scores.sort(key=lambda x: x.get("s", 0), reverse=True)
