@@ -1,4 +1,4 @@
 python-dotenv
+psycopg2-binary
 PyJWT
 bcrypt
-psycopg2-binary
