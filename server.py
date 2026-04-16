@@ -554,7 +554,8 @@ class Handler(SimpleHTTPRequestHandler):
                 """INSERT INTO scores (username, total_score, updated_at) 
                    VALUES (%s, %s, CURRENT_TIMESTAMP)
                    ON CONFLICT (username) DO UPDATE SET 
-                   total_score = scores.total_score + EXCLUDED.total_score, updated_at = CURRENT_TIMESTAMP""",
+                   total_score = GREATEST(scores.total_score, EXCLUDED.total_score),
+                   updated_at = CURRENT_TIMESTAMP""",
                 (username, int(score))
             )
             conn.commit()
