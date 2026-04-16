@@ -679,14 +679,16 @@ class Handler(SimpleHTTPRequestHandler):
             "temperature": 0.7 if mode == "sim" else 0.2,
         }
 
-        if messages and isinstance(messages, list):
-            req_body["messages"] = messages
+        if mode == "sim":
+            system_msg = _system_prompt_sim(scenario)
         else:
-            if mode == "sim":
-                system_msg = _system_prompt_sim(scenario)
-            else:
-                system_msg = _system_prompt_adv()
+            system_msg = _system_prompt_adv()
 
+        if messages and isinstance(messages, list):
+            req_body["messages"] = [
+                {"role": "system", "content": system_msg}
+            ] + messages
+        else:
             req_body["messages"] = [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": text[:MAX_INPUT_CHARS]},
