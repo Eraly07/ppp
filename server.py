@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen3.6-plus:free"
+DEFAULT_MODEL = "deepseek/deepseek-v3.2"
 
 RATE_WINDOW_SEC = int(os.getenv("RATE_WINDOW_SEC", "60"))
 RATE_MAX = int(os.getenv("RATE_MAX", "20"))
