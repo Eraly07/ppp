@@ -2,10 +2,17 @@ import json
 import os
 import re
 import time
+import hashlib
+import hmac
+import secrets
+import psycopg2
+import jwt
+from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from psycopg2.extras import RealDictCursor
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v3.2"
@@ -17,7 +24,13 @@ OPENROUTER_TIMEOUT_SEC = float(os.getenv("OPENROUTER_TIMEOUT_SEC", "35"))
 OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "350"))
 OPENROUTER_ANALYZE_MAX_TOKENS = int(os.getenv("OPENROUTER_ANALYZE_MAX_TOKENS", "200"))
 
+# JWT CONFIG
+JWT_SECRET = os.getenv("JWT_SECRET", "cifrsawat_super_secret_2025_xyz789")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 7
+
 _rate = {}
+_db_pool = None
 
 def _load_dotenv(path: str) -> None:
     try:
@@ -58,6 +71,104 @@ def _get_openrouter_key() -> str:
 
 def _get_model() -> str:
     return (os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
+
+# ════════════════════════════════════════════════════════════
+# DATABASE
+# ════════════════════════════════════════════════════════════
+
+def _get_db_connection():
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return None
+    try:
+        conn = psycopg2.connect(db_url)
+        return conn
+    except Exception as e:
+        print(f"DB Error: {e}")
+        return None
+
+def _init_db():
+    conn = _get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    try:
+        # Users table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(24) UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # User progress table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_progress (
+                username VARCHAR(24) PRIMARY KEY,
+                progress_data JSONB DEFAULT '{}',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Scores table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scores (
+                username VARCHAR(24) PRIMARY KEY,
+                total_score INT DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+    except Exception as e:
+        print(f"Init DB Error: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+# ════════════════════════════════════════════════════════════
+# PASSWORD & TOKEN
+# ════════════════════════════════════════════════════════════
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000).hex()
+    return f"{salt}${h}"
+
+def _verify_password(password: str, hashed: str) -> bool:
+    try:
+        parts = hashed.split('$')
+        if len(parts) != 2:
+            return False
+        salt, h = parts
+        new_h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000).hex()
+        return hmac.compare_digest(new_h, h)
+    except:
+        return False
+
+def _generate_token(username: str) -> str:
+    payload = {
+        "username": username,
+        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRY_DAYS),
+        "iat": datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def _verify_token(token: str) -> str | None:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("username")
+    except:
+        return None
+
+def _extract_username(headers) -> str | None:
+    auth = headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    token = auth[7:]
+    return _verify_token(token)
 
 def _system_prompt_adv() -> str:
     return (
@@ -149,6 +260,10 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             return self.path
 
+    def _is_path(self, path: str) -> bool:
+        p = (self._req_path() or "").rstrip("/")
+        return p == path
+
     def _is_ai_path(self) -> bool:
         p = (self._req_path() or "").rstrip("/")
         return p == "/api/ai"
@@ -175,7 +290,7 @@ class Handler(SimpleHTTPRequestHandler):
         else:
             self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def _send_json(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -188,14 +303,195 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_OPTIONS(self) -> None:
-        if not (self._is_ai_path() or self._is_analyze_path() or self._is_scores_path()):
-            self.send_error(404)
-            return
         self.send_response(204)
         self._cors_headers()
         self.end_headers()
 
+    # ─ AUTH ─────────────────────────────────────────────────
+
+    def _handle_register(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            payload = json.loads(body.decode("utf-8"))
+        except:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        username = (payload.get("username") or "").strip()
+        password = (payload.get("password") or "").strip()
+
+        if not username or len(username) < 3 or len(username) > 24:
+            self._send_json(400, {"error": "Username must be 3-24 characters"})
+            return
+        if not password or len(password) < 4:
+            self._send_json(400, {"error": "Password must be at least 4 characters"})
+            return
+
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(500, {"error": "DB error"})
+            return
+
+        cur = conn.cursor()
+        try:
+            password_hash = _hash_password(password)
+            cur.execute(
+                "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+                (username, password_hash)
+            )
+            conn.commit()
+            token = _generate_token(username)
+            self._send_json(201, {"ok": True, "token": token, "username": username})
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            self._send_json(409, {"error": "Username already exists"})
+        except Exception as e:
+            conn.rollback()
+            self._send_json(500, {"error": "Server error"})
+        finally:
+            cur.close()
+            conn.close()
+
+    def _handle_login(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            payload = json.loads(body.decode("utf-8"))
+        except:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        username = (payload.get("username") or "").strip()
+        password = (payload.get("password") or "").strip()
+
+        if not username or not password:
+            self._send_json(400, {"error": "Missing username or password"})
+            return
+
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(500, {"error": "DB error"})
+            return
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+            user = cur.fetchone()
+
+            if not user or not _verify_password(password, user["password_hash"]):
+                self._send_json(401, {"error": "Invalid credentials"})
+                return
+
+            token = _generate_token(username)
+            self._send_json(200, {"ok": True, "token": token, "username": username})
+        except Exception as e:
+            self._send_json(500, {"error": "Server error"})
+        finally:
+            cur.close()
+            conn.close()
+
+    def _handle_me(self) -> None:
+        username = _extract_username(self.headers)
+        if not username:
+            self._send_json(401, {"error": "Unauthorized"})
+            return
+
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(500, {"error": "DB error"})
+            return
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute("SELECT username, created_at FROM users WHERE username = %s", (username,))
+            user = cur.fetchone()
+
+            if not user:
+                self._send_json(404, {"error": "User not found"})
+                return
+
+            self._send_json(200, {
+                "username": user["username"],
+                "created_at": user["created_at"].isoformat() if user["created_at"] else None
+            })
+        except Exception as e:
+            self._send_json(500, {"error": "Server error"})
+        finally:
+            cur.close()
+            conn.close()
+
+    # ─ PROGRESS ─────────────────────────────────────────────
+
+    def _handle_progress_get(self) -> None:
+        username = _extract_username(self.headers)
+        if not username:
+            self._send_json(401, {"error": "Unauthorized"})
+            return
+
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(500, {"error": "DB error"})
+            return
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute("SELECT progress_data FROM user_progress WHERE username = %s", (username,))
+            row = cur.fetchone()
+            progress = row["progress_data"] if row else {}
+            self._send_json(200, {"progress": progress})
+        except Exception as e:
+            self._send_json(500, {"error": "Server error"})
+        finally:
+            cur.close()
+            conn.close()
+
+    def _handle_progress_post(self) -> None:
+        username = _extract_username(self.headers)
+        if not username:
+            self._send_json(401, {"error": "Unauthorized"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            payload = json.loads(body.decode("utf-8"))
+        except:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        progress = payload.get("progress", {})
+
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(500, {"error": "DB error"})
+            return
+
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """INSERT INTO user_progress (username, progress_data, updated_at) 
+                   VALUES (%s, %s, CURRENT_TIMESTAMP)
+                   ON CONFLICT (username) DO UPDATE SET 
+                   progress_data = EXCLUDED.progress_data, updated_at = CURRENT_TIMESTAMP""",
+                (username, json.dumps(progress, ensure_ascii=False))
+            )
+            conn.commit()
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            conn.rollback()
+            self._send_json(500, {"error": "Server error"})
+        finally:
+            cur.close()
+            conn.close()
+
     def do_GET(self) -> None:
+        if self._is_path("/api/auth/me"):
+            self._handle_me()
+            return
+        if self._is_path("/api/user/progress"):
+            self._handle_progress_get()
+            return
         if self._is_scores_path():
             self._handle_scores_get()
             return
@@ -222,49 +518,69 @@ class Handler(SimpleHTTPRequestHandler):
             json.dump(scores, f, ensure_ascii=False)
 
     def _handle_scores_get(self) -> None:
-        scores = self._load_scores()
-        # Сорттап топ-20 қайтарамыз
-        scores.sort(key=lambda x: x.get("s", 0), reverse=True)
-        self._send_json(200, {"scores": scores[:20]})
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(200, {"scores": []})
+            return
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cur.execute(
+                "SELECT username, total_score FROM scores ORDER BY total_score DESC LIMIT 20"
+            )
+            rows = cur.fetchall()
+            scores = [
+                {"name": r["username"], "s": r["total_score"], "d": ""}
+                for r in rows
+            ]
+            self._send_json(200, {"scores": scores})
+        except Exception as e:
+            self._send_json(200, {"scores": []})
+        finally:
+            cur.close()
+            conn.close()
 
     def _handle_scores_post(self) -> None:
+        username = _extract_username(self.headers)
+        if not username:
+            self._send_json(401, {"error": "Unauthorized"})
+            return
+
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
-        except ValueError:
-            self._send_json(400, {"error": "Invalid Content-Length."})
-            return
-        body = self.rfile.read(length) if length > 0 else b"{}"
-        try:
+            body = self.rfile.read(length) if length > 0 else b"{}"
             payload = json.loads(body.decode("utf-8"))
-        except Exception:
-            self._send_json(400, {"error": "Invalid JSON."})
+        except:
+            self._send_json(400, {"error": "Invalid JSON"})
             return
 
-        name = (payload.get("name") or "").strip()[:24]
-        score = payload.get("score")
-        course_id = (payload.get("course_id") or payload.get("type") or "course").strip()
-        course = (payload.get("course") or "").strip()[:80]
-
-        if not name:
-            self._send_json(400, {"error": "Missing name."})
-            return
+        score = payload.get("score", 0)
         if not isinstance(score, (int, float)) or score < 0:
-            self._send_json(400, {"error": "Invalid score."})
+            self._send_json(400, {"error": "Invalid score"})
             return
 
-        scores = self._load_scores()
-        from datetime import date
-        today = date.today().strftime("%d.%m")
+        conn = _get_db_connection()
+        if not conn:
+            self._send_json(500, {"error": "DB error"})
+            return
 
-        # Бір күнде бір атпен бір рет
-        scores = [r for r in scores if not (r.get("name") == name and r.get("course_id") == course_id)]
-        scores.append({"name": name, "s": int(score), "d": today, "type": course_id, "course_id": course_id, "course": course})
-
-        # Максимум 200 жазба сақтаймыз
-        scores.sort(key=lambda x: x.get("s", 0), reverse=True)
-        scores = scores[:200]
-        self._save_scores(scores)
-        self._send_json(200, {"ok": True})
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """INSERT INTO scores (username, total_score, updated_at) 
+                   VALUES (%s, %s, CURRENT_TIMESTAMP)
+                   ON CONFLICT (username) DO UPDATE SET 
+                   total_score = scores.total_score + EXCLUDED.total_score, updated_at = CURRENT_TIMESTAMP""",
+                (username, int(score))
+            )
+            conn.commit()
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            conn.rollback()
+            self._send_json(500, {"error": "Server error"})
+        finally:
+            cur.close()
+            conn.close()
     # ───────────────────────────────────────────────────────────────
 
     def _handle_analyze(self) -> None:
@@ -359,6 +675,15 @@ class Handler(SimpleHTTPRequestHandler):
         self._send_json(200, {"content": content, "usage": usage, "model": _get_model()})
 
     def do_POST(self) -> None:
+        if self._is_path("/api/auth/register"):
+            self._handle_register()
+            return
+        if self._is_path("/api/auth/login"):
+            self._handle_login()
+            return
+        if self._is_path("/api/user/progress"):
+            self._handle_progress_post()
+            return
         if self._is_scores_path():
             self._handle_scores_post()
             return
@@ -484,6 +809,10 @@ def main() -> None:
     os.chdir(root_dir)
     _load_dotenv(os.path.join(root_dir, ".env"))
     _load_dotenv(os.path.join(root_dir, "api.env"))
+    
+    # Initialize database
+    _init_db()
+    
     port = int(os.getenv("PORT", "8787"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
