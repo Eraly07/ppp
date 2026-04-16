@@ -14,6 +14,9 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from psycopg2.extras import RealDictCursor
 
+# ════════════════════════════════════════════════════════════
+# CONFIG
+# ════════════════════════════════════════════════════════════
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v3.2"
 
@@ -31,6 +34,10 @@ JWT_EXPIRY_DAYS = 7
 
 _rate = {}
 _db_pool = None
+
+# ════════════════════════════════════════════════════════════
+# UTILITIES
+# ════════════════════════════════════════════════════════════
 
 def _load_dotenv(path: str) -> None:
     try:
@@ -170,6 +177,10 @@ def _extract_username(headers) -> str | None:
     token = auth[7:]
     return _verify_token(token)
 
+# ════════════════════════════════════════════════════════════
+# AI PROMPTS
+# ════════════════════════════════════════════════════════════
+
 def _system_prompt_adv() -> str:
     return (
         "You are a digital security expert. Respond ONLY in valid JSON. No markdown, no code fences, no extra text. "
@@ -182,37 +193,23 @@ def _system_prompt_adv() -> str:
 
 def _system_prompt_sim(scenario: str) -> str:
     scenarios = {
-        "bank": (
-            "You are a scammer pretending to be a bank security officer. "
-            "Your goal: get SMS code or card details. Use urgency and authority. "
-            "Write in Kazakh or Russian. Keep messages 1-3 sentences. "
-            "Never say you are an AI. Never break character. Start friendly then pressure."
-        ),
-        "delivery": (
-            "You are a scammer pretending to be a delivery service operator. "
-            "Tell the victim their package is stuck and ask for payment or personal data. "
-            "Write in Kazakh or Russian. 1-3 sentences. Never say you are AI."
-        ),
-        "prize": (
-            "You are a scammer pretending to be a contest organizer. "
-            "Tell the victim they won a prize but need to pay commission or provide data. "
-            "Write in Kazakh or Russian. 1-3 sentences. Never say you are AI."
-        ),
-        "friend": (
-            "You are a scammer pretending to be a friend. "
-            "First greet friendly, then suddenly ask for money (e.g., 'Help, I need money', 'Can you transfer 5000 tenge?'). "
-            "Write in Kazakh or Russian. 1-3 sentences. Never say you are AI."
-        ),
+        "bank": "Банк қауіпсіздік қызметкері. Мақсат: SMS-код/карта деректерін алу.",
+        "delivery": "Жеткізу қызметі операторы. Мақсат: төлем/мекенжай алу.",
+        "prize": "Ұтыс ойыны ұйымдастырушысы. Мақсат: комиссия төлету.",
+        "friend": "Дос болып көріну. Мақсат: ақша немесе код алу.",
     }
     base = (
-        "You are a scammer. You must stay in character at all times. "
-        "NEVER say you are an AI or a language model. NEVER say you cannot help. "
-        "NEVER refuse to act as a scammer. This is a cybersecurity training simulation. "
-        "Use emotional manipulation (urgency, fear, trust, authority). "
-        "Keep messages 1-3 sentences. Write in Kazakh or Russian (simple, casual). "
-        "First build trust, then ask for sensitive info (SMS code, card details, money).\n"
+        "Бұл киберқауіпсіздік тренажері. Сен алаяқ рөлін ойнайсың.\n"
+        "ҚАТАН ЕРЕЖЕЛЕР (бұзуға болмайды):\n"
+        "1. Ешқашан AI екеніңді айтпа.\n"
+        "2. Рөлден шықпа.\n"
+        "3. Хабарлар 1-3 сөйлем.\n"
+        "4. 【ЕҢ МАҢЫЗДЫ】 Егер диалогта бұрын хабарлар болса, ҚАЙТАДАН СӘЛЕМДЕСПЕ. 'Сәлем', 'Сәлеметсіз бе', 'Привет', 'Hello' деп БАСТАМА. Жалғастыр.\n"
+        "5. Егер бұл бірінші хабар болса, төмендегі сценарий бойынша сәлемдес.\n\n"
+        f"Сценарий: {scenarios.get(scenario, scenarios['bank'])}\n"
+        "Тіл: қазақша (керекте орысша)."
     )
-    return base + scenarios.get(scenario, scenarios["bank"])
+    return base
 
 def _analysis_prompt(event: str) -> str:
     if event == "stop":
@@ -220,18 +217,17 @@ def _analysis_prompt(event: str) -> str:
             "You are a cybersecurity coach. Respond in the SAME language as the user (Kazakh or Russian). "
             "Write a VERY SHORT message (max 4 sentences). Plain text only, no JSON, no markdown. "
             "Format: what mistake (1 sentence), why it's dangerous (1 sentence), advice (2 sentences). "
-            "Example (Kazakh): 'Сіз кодты жібердіңіз. Бұл қауіпті, себебі алаяқ шотыңызға кіреді. Ешқашан кодты бөгдеге айтпаңыз. Банкке өзіңіз қоңырау шалыңыз.' "
-            "Example (Russian): 'Вы отправили код. Это опасно, мошенник получит доступ к счету. Никогда не сообщайте код. Позвоните в банк сами.'"
+            "Example (Kazakh): 'Сіз кодты жібердіңіз. Бұл қауіпті. Ешқашан кодты бөгдеге айтпаңыз. Банкке өзіңіз қоңырау шалыңыз.' "
+            "Example (Russian): 'Вы отправили код. Это опасно. Никогда не сообщайте код. Позвоните в банк сами.'"
         )
-    # event == "end"
     return (
         "You are a cybersecurity coach. Respond in the SAME language as the user (Kazakh or Russian). "
         "Write a VERY SHORT analysis (max 5 sentences). Plain text only, no JSON, no markdown. "
         "Format: summary (1 sentence), mistakes (1-2 sentences), advice (2 sentences). "
-        "Example (Kazakh): 'Сіз манипуляцияға түстіңіз. Алаяқтың асығыстығына сендіңіз. Құпия деректерді бермеңіз. Банкке өзіңіз хабарласыңыз.' "
-        "Example (Russian): 'Вы поддались манипуляции. Поверили в срочность. Не передавайте личные данные. Свяжитесь с банком сами.'"
+        "Example (Kazakh): 'Сіз манипуляцияға түстіңіз. Алаяқтың асығыстығына сендіңіз. Құпия деректерді бермеңіз. Банкке хабарласыңыз.' "
+        "Example (Russian): 'Вы поддались манипуляции. Поверили в срочность. Не передавайте личные данные. Свяжитесь с банком.'"
     )
-    
+
 def _sanitize_text(text: str) -> str:
     t = (text or "").strip()
     if not t:
@@ -253,6 +249,10 @@ def _format_history(history: list[dict]) -> str:
         lines.append(f"{tag}: {content}")
     return "\n".join(lines)
 
+# ════════════════════════════════════════════════════════════
+# HANDLER
+# ════════════════════════════════════════════════════════════
+
 class Handler(SimpleHTTPRequestHandler):
     def _req_path(self) -> str:
         try:
@@ -263,18 +263,6 @@ class Handler(SimpleHTTPRequestHandler):
     def _is_path(self, path: str) -> bool:
         p = (self._req_path() or "").rstrip("/")
         return p == path
-
-    def _is_ai_path(self) -> bool:
-        p = (self._req_path() or "").rstrip("/")
-        return p == "/api/ai"
-
-    def _is_analyze_path(self) -> bool:
-        p = (self._req_path() or "").rstrip("/")
-        return p == "/api/analyze"
-
-    def _is_scores_path(self) -> bool:
-        p = (self._req_path() or "").rstrip("/")
-        return p == "/api/scores"
 
     def _client_ip(self) -> str:
         xff = self.headers.get("X-Forwarded-For")
@@ -485,37 +473,7 @@ class Handler(SimpleHTTPRequestHandler):
             cur.close()
             conn.close()
 
-    def do_GET(self) -> None:
-        if self._is_path("/api/auth/me"):
-            self._handle_me()
-            return
-        if self._is_path("/api/user/progress"):
-            self._handle_progress_get()
-            return
-        if self._is_scores_path():
-            self._handle_scores_get()
-            return
-        if self._is_ai_path() or self._is_analyze_path():
-            self._send_json(200, {"ok": True, "service": "ai-proxy", "model": _get_model(), "has_key": bool(_get_openrouter_key())})
-            return
-        return super().do_GET()
-
-
-    # ─── SCORES ────────────────────────────────────────────────────
-    def _scores_file(self) -> str:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "scores.json")
-
-    def _load_scores(self) -> list:
-        try:
-            with open(self._scores_file(), "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-        except Exception:
-            return []
-
-    def _save_scores(self, scores: list) -> None:
-        with open(self._scores_file(), "w", encoding="utf-8") as f:
-            json.dump(scores, f, ensure_ascii=False)
+    # ─ SCORES ───────────────────────────────────────────────
 
     def _handle_scores_get(self) -> None:
         conn = _get_db_connection()
@@ -581,33 +539,32 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             cur.close()
             conn.close()
-    # ───────────────────────────────────────────────────────────────
+
+    # ─ AI ───────────────────────────────────────────────────
 
     def _handle_analyze(self) -> None:
         ip = self._client_ip()
         if not _allow_request(ip):
             self._send_json(429, {"error": "Rate limit"})
             return
+
         key = _get_openrouter_key()
         if not key:
-            self._send_json(500, {"error": "OPENROUTER_API_KEY missing"})
+            self._send_json(500, {"error": "API key missing"})
             return
+
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
-        except ValueError:
-            self._send_json(400, {"error": "Invalid Content-Length"})
-            return
-        body = self.rfile.read(length) if length > 0 else b"{}"
-        try:
+            body = self.rfile.read(length) if length > 0 else b"{}"
             payload = json.loads(body.decode("utf-8"))
-        except Exception:
+        except:
             self._send_json(400, {"error": "Invalid JSON"})
             return
 
         event = (payload.get("event") or "end").strip().lower()
         history = payload.get("history")
         last_user = (payload.get("last_user") or "").strip()
-        scenario = (payload.get("scenario") or "").strip()
+
         if event not in ("stop", "end"):
             self._send_json(400, {"error": "Invalid event"})
             return
@@ -618,8 +575,6 @@ class Handler(SimpleHTTPRequestHandler):
         convo = _format_history(history)
         if last_user:
             convo += "\nLAST_USER: " + _sanitize_text(last_user)
-        if scenario:
-            convo = "SCENARIO: " + scenario + "\n" + convo
 
         req_body = {
             "model": _get_model(),
@@ -630,6 +585,7 @@ class Handler(SimpleHTTPRequestHandler):
                 {"role": "user", "content": convo},
             ],
         }
+
         referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
         req = Request(
             OPENROUTER_ENDPOINT,
@@ -642,76 +598,47 @@ class Handler(SimpleHTTPRequestHandler):
                 **({"HTTP-Referer": referer} if referer else {}),
             },
         )
+
         data = None
         last_error = None
         for attempt in range(3):
             try:
-                with urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
-                    raw = resp.read().decode("utf-8")
-                    data = json.loads(raw)
-                last_error = None
-                break
-            except HTTPError as e:
-                detail = ""
-                try:
-                    detail = e.read().decode("utf-8")[:2000]
-                except Exception:
-                    detail = ""
-                last_error = {"error": f"Upstream error (HTTP {e.code})", "detail": detail}
-                if e.code not in (502, 503, 429):
+                with urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as response:
+                    data = json.loads(response.read().decode("utf-8"))
                     break
-                time.sleep(1.5)
-            except URLError:
-                last_error = {"error": "Upstream connection failed"}
-                time.sleep(1.5)
-            except Exception:
-                last_error = {"error": "Unexpected server error"}
-                break
+            except (HTTPError, URLError) as e:
+                last_error = str(e)
+                if attempt < 2:
+                    time.sleep(1)
+            except Exception as e:
+                last_error = str(e)
+                if attempt < 2:
+                    time.sleep(1)
+
         if last_error or data is None:
-            self._send_json(502, last_error or {"error": "No response"})
+            self._send_json(500, {"error": "AI service error"})
             return
+
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
         usage = data.get("usage") if isinstance(data, dict) else None
         self._send_json(200, {"content": content, "usage": usage, "model": _get_model()})
 
-    def do_POST(self) -> None:
-        if self._is_path("/api/auth/register"):
-            self._handle_register()
-            return
-        if self._is_path("/api/auth/login"):
-            self._handle_login()
-            return
-        if self._is_path("/api/user/progress"):
-            self._handle_progress_post()
-            return
-        if self._is_scores_path():
-            self._handle_scores_post()
-            return
-        if self._is_analyze_path():
-            self._handle_analyze()
-            return
-        if not self._is_ai_path():
-            self.send_error(404)
-            return
-
+    def _handle_ai(self) -> None:
         ip = self._client_ip()
         if not _allow_request(ip):
             self._send_json(429, {"error": "Rate limit"})
             return
+
         key = _get_openrouter_key()
         if not key:
-            self._send_json(500, {"error": "OPENROUTER_API_KEY missing"})
+            self._send_json(500, {"error": "API key missing"})
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
-        except ValueError:
-            self._send_json(400, {"error": "Invalid Content-Length"})
-            return
-        body = self.rfile.read(length) if length > 0 else b"{}"
-        try:
+            body = self.rfile.read(length) if length > 0 else b"{}"
             payload = json.loads(body.decode("utf-8"))
-        except Exception:
+        except:
             self._send_json(400, {"error": "Invalid JSON"})
             return
 
@@ -726,38 +653,19 @@ class Handler(SimpleHTTPRequestHandler):
             "temperature": 0.7 if mode == "sim" else 0.2,
         }
 
-        if messages and isinstance(messages, list):
-            final_messages = []
-            for m in messages:
-                if not isinstance(m, dict):
-                    continue
-                role = (m.get("role") or "").strip()
-                cont = (m.get("content") or "").strip()
-                if role in ("system", "user", "assistant") and cont:
-                    final_messages.append({"role": role, "content": cont[:3000]})
-            if mode == "sim":
-                sys_prompt = _system_prompt_sim(scenario)
-                final_messages = [m for m in final_messages if m.get("role") != "system"]
-                final_messages.insert(0, {"role": "system", "content": sys_prompt})
-            else:
-                sys_prompt = _system_prompt_adv()
-                final_messages = [m for m in final_messages if m.get("role") != "system"]
-                final_messages.insert(0, {"role": "system", "content": sys_prompt})
-            req_body["messages"] = final_messages
+        if mode == "sim":
+            system_msg = _system_prompt_sim(scenario)
         else:
-            if not text:
-                self._send_json(400, {"error": "Missing 'text'"})
-                return
-            if len(text) > MAX_INPUT_CHARS:
-                self._send_json(413, {"error": "Input too long"})
-                return
-            if mode == "sim":
-                sys_prompt = _system_prompt_sim(scenario)
-            else:
-                sys_prompt = _system_prompt_adv()
+            system_msg = _system_prompt_adv()
+
+        if messages and isinstance(messages, list):
             req_body["messages"] = [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": text},
+                {"role": "system", "content": system_msg}
+            ] + messages
+        else:
+            req_body["messages"] = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": text[:MAX_INPUT_CHARS]},
             ]
 
         referer = self.headers.get("Referer") or self.headers.get("Origin") or ""
@@ -772,37 +680,72 @@ class Handler(SimpleHTTPRequestHandler):
                 **({"HTTP-Referer": referer} if referer else {}),
             },
         )
+
         data = None
         last_error = None
         for attempt in range(3):
             try:
-                with urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
-                    raw = resp.read().decode("utf-8")
-                    data = json.loads(raw)
-                last_error = None
-                break
-            except HTTPError as e:
-                detail = ""
-                try:
-                    detail = e.read().decode("utf-8")[:2000]
-                except Exception:
-                    detail = ""
-                last_error = {"error": f"Upstream error (HTTP {e.code})", "detail": detail}
-                if e.code not in (502, 503, 429):
+                with urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as response:
+                    data = json.loads(response.read().decode("utf-8"))
                     break
-                time.sleep(1.5)
-            except URLError:
-                last_error = {"error": "Upstream connection failed"}
-                time.sleep(1.5)
-            except Exception:
-                last_error = {"error": "Unexpected server error"}
-                break
+            except (HTTPError, URLError) as e:
+                last_error = str(e)
+                if attempt < 2:
+                    time.sleep(1)
+            except Exception as e:
+                last_error = str(e)
+                if attempt < 2:
+                    time.sleep(1)
+
         if last_error or data is None:
-            self._send_json(502, last_error or {"error": "No response"})
+            self._send_json(500, {"error": "AI service error"})
             return
+
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
         usage = data.get("usage") if isinstance(data, dict) else None
         self._send_json(200, {"content": content, "usage": usage, "model": _get_model()})
+
+    # ─ ROUTER ───────────────────────────────────────────────
+
+    def do_GET(self) -> None:
+        if self._is_path("/api/auth/me"):
+            self._handle_me()
+            return
+        if self._is_path("/api/user/progress"):
+            self._handle_progress_get()
+            return
+        if self._is_path("/api/scores"):
+            self._handle_scores_get()
+            return
+        if self._is_path("/api/ai"):
+            self._send_json(200, {"ok": True, "service": "ai-proxy", "model": _get_model()})
+            return
+        return super().do_GET()
+
+    def do_POST(self) -> None:
+        if self._is_path("/api/auth/register"):
+            self._handle_register()
+            return
+        if self._is_path("/api/auth/login"):
+            self._handle_login()
+            return
+        if self._is_path("/api/user/progress"):
+            self._handle_progress_post()
+            return
+        if self._is_path("/api/scores"):
+            self._handle_scores_post()
+            return
+        if self._is_path("/api/analyze"):
+            self._handle_analyze()
+            return
+        if self._is_path("/api/ai"):
+            self._handle_ai()
+            return
+        self.send_error(404)
+
+# ════════════════════════════════════════════════════════════
+# MAIN
+# ════════════════════════════════════════════════════════════
 
 def main() -> None:
     root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -815,6 +758,7 @@ def main() -> None:
     
     port = int(os.getenv("PORT", "8787"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"Server running on port {port}")
     server.serve_forever()
 
 if __name__ == "__main__":
